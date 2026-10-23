@@ -1,36 +1,71 @@
+
 pipeline {
-    agent { 
-        node {
-            label 'docker-agent'
-            }
-      }
-    triggers {
-        pollSCM '* * * * *'
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
     }
+
+    triggers {
+        // Backup polling; GitHub webhook provides faster triggering.
+        pollSCM('H/2 * * * *')
+    }
+
     stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Build') {
             steps {
-                echo "Building.."
                 sh '''
-                pip install -r requirements.txt
+                    python3 --version
+                    python3 -m compileall -q calc.py
+                    mkdir -p dist
                 '''
             }
         }
-        stage('Test') {
+
+        stage('Unit Tests') {
             steps {
-                echo "Testing.."
+                sh 'python3 -m unittest discover -s . -p "test_*.py" -v'
+            }
+        }
+
+        stage('Create Artifact') {
+            steps {
                 sh '''
-                python3 cal.py
+                    tar -czf dist/calculator-${BUILD_NUMBER}.tar.gz \
+                        calc.py test_calc.py
+                '''
+                archiveArtifacts artifacts: 'dist/*.tar.gz',
+                                 fingerprint: true
+            }
+        }
+
+        stage('Deploy') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Tests passed. Deploying tested artifact.'
+                sh '''
+                    echo "Artifact ready: dist/calculator-${BUILD_NUMBER}.tar.gz"
+                    # Add your real deployment command here.
                 '''
             }
         }
-        stage('Deliver') {
-            steps {
-                echo 'Deliver....'
-                sh '''
-                echo "doing delivery stuff.."
-                '''
-            }
+    }
+
+    post {
+        success {
+            echo 'CI pipeline successful'
+        }
+        failure {
+            echo 'Pipeline failed; deployment was not completed'
         }
     }
 }
