@@ -7,65 +7,98 @@ pipeline {
         disableConcurrentBuilds()
     }
 
-    triggers {
-        // Backup polling; GitHub webhook provides faster triggering.
-        pollSCM('H/2 * * * *')
+    environment {
+        APP_NAME = 'calculator'
+        DEPLOY_DIR = '/opt/calculator'
     }
 
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
+                sh 'git log -1 --oneline'
             }
         }
 
         stage('Build') {
             steps {
                 sh '''
+                    set -eu
                     python3 --version
-                    python3 -m compileall -q calc.py
+                    python3 -m py_compile calc.py test_calc.py
                     mkdir -p dist
+                    tar --exclude=.git --exclude=dist \
+                        --exclude=__pycache__ \
+                        -czf dist/calculator.tar.gz \
+                        calc.py test_calc.py
                 '''
             }
         }
 
         stage('Unit Tests') {
             steps {
-                sh 'python3 -m unittest discover -s . -p "test_*.py" -v'
+                sh '''
+                    set -eu
+                    python3 -m unittest -v test_calc
+                '''
             }
         }
 
-        stage('Create Artifact') {
+        stage('Archive Artifact') {
             steps {
-                sh '''
-                    tar -czf dist/calculator-${BUILD_NUMBER}.tar.gz \
-                        calc.py test_calc.py
-                '''
-                archiveArtifacts artifacts: 'dist/*.tar.gz',
-                                 fingerprint: true
+                archiveArtifacts(
+                    artifacts: 'dist/calculator.tar.gz',
+                    fingerprint: true
+                )
             }
         }
 
         stage('Deploy') {
             when {
                 branch 'main'
+                expression {
+                    return params.DEPLOY_TO_SERVER
+                }
             }
             steps {
-                echo 'Tests passed. Deploying tested artifact.'
-                sh '''
-                    echo "Artifact ready: dist/calculator-${BUILD_NUMBER}.tar.gz"
-                    # Add your real deployment command here.
-                '''
+                sshagent(credentials: ['calculator-deploy-key']) {
+                    sh '''
+                        set -eu
+
+                        scp -o StrictHostKeyChecking=yes \
+                            dist/calculator.tar.gz \
+                            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/calculator.tar.gz"
+
+                        ssh -o StrictHostKeyChecking=yes \
+                            "$DEPLOY_USER@$DEPLOY_HOST" \
+                            "sudo mkdir -p '$DEPLOY_DIR' &&
+                             sudo tar -xzf /tmp/calculator.tar.gz \
+                               -C '$DEPLOY_DIR' &&
+                             sudo chmod 755 '$DEPLOY_DIR/calc.py' &&
+                             rm -f /tmp/calculator.tar.gz"
+                    '''
+                }
             }
         }
     }
 
+    parameters {
+        booleanParam(
+            name: 'DEPLOY_TO_SERVER',
+            defaultValue: false,
+            description: 'Deploy to the configured Linux server'
+        )
+    }
+
     post {
+        always {
+            echo "Pipeline finished: ${currentBuild.currentResult}"
+        }
         success {
-            echo 'CI pipeline successful'
+            echo 'Build, tests and enabled deployment completed successfully.'
         }
         failure {
-            echo 'Pipeline failed; deployment was not completed'
+            echo 'Pipeline failed. Check the console output.'
         }
     }
 }
